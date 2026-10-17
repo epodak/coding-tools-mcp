@@ -815,6 +815,17 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "manage_screen_power": ToolSpec(
+        title="Manage screen power",
+        description=(
+            "Control MacBook screen power and brightness on macOS without locking. "
+            "Supported actions: 'status' (get brightness and idle info), 'black' (turn screen black to save power), "
+            "'dim' (drop to lowest brightness), 'wake' or 'on' (restore display brightness), "
+            "'set' (set explicit brightness 0.0-1.0), 'nolock' (disable password lock on idle screen dimming)."
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
     "list_files": ToolSpec(
         title="List files",
         description="List accessible files using glob filters.",
@@ -2877,6 +2888,46 @@ class Runtime:
             "displayed": displayed,
             "pid": pid,
         }
+
+    def manage_screen_power(self, args: dict[str, Any]) -> dict[str, Any]:
+        action = str(args.get("action") or "status").strip().lower()
+        target_b = args.get("brightness")
+
+        if sys.platform != "darwin":
+            return {
+                "status": "unsupported_platform",
+                "action": action,
+                "brightness": None,
+                "percentage": "n/a",
+                "success": False,
+                "details": "Screen power management is currently only supported on macOS hosts.",
+            }
+
+        cmd = ["mac-screen", action]
+        if target_b is not None and action in ("set", "on", "wake", "bright"):
+            cmd.append(str(float(target_b)))
+
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
+            stdout = res.stdout.strip()
+            data = json.loads(stdout) if stdout.startswith("{") and stdout.endswith("}") else {}
+            return {
+                "status": "ok" if res.returncode == 0 else "error",
+                "action": action,
+                "brightness": data.get("brightness"),
+                "percentage": data.get("percentage", ""),
+                "success": res.returncode == 0,
+                "details": stdout or res.stderr.strip(),
+            }
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "action": action,
+                "brightness": None,
+                "percentage": "",
+                "success": False,
+                "details": str(exc),
+            }
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
@@ -6169,6 +6220,8 @@ def output_schemas() -> dict[str, dict[str, Any]]:
     nullable_string: dict[str, Any] = {"type": ["string", "null"]}
     integer: dict[str, Any] = {"type": "integer"}
     nullable_integer: dict[str, Any] = {"type": ["integer", "null"]}
+    number: dict[str, Any] = {"type": "number"}
+    nullable_number: dict[str, Any] = {"type": ["number", "null"]}
     boolean: dict[str, Any] = {"type": "boolean"}
     string_array: dict[str, Any] = {"type": "array", "items": {"type": "string"}}
     object_array: dict[str, Any] = {"type": "array", "items": {"type": "object", "additionalProperties": True}}
@@ -6307,6 +6360,14 @@ def output_schemas() -> dict[str, dict[str, Any]]:
             "report_path": string,
             "displayed": boolean,
             "pid": integer,
+        },
+        "manage_screen_power": {
+            "status": string,
+            "action": string,
+            "brightness": nullable_number,
+            "percentage": string,
+            "success": boolean,
+            "details": string,
         },
         "list_files": {"path": string, "files": object_array, **truncation},
         "search_text": {
@@ -6551,6 +6612,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
     # ~190-line schema dict on every tools/call dispatch is measurable.
     string = {"type": "string"}
     integer = {"type": "integer"}
+    number = {"type": "number"}
     boolean = {"type": "boolean"}
     string_array = {"type": "array", "items": {"type": "string"}}
     return {
@@ -6617,6 +6679,22 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "sound": {**boolean, "default": True, "description": "Whether to play a subtle system alert sound."},
             },
             ["title", "message"],
+        ),
+        "manage_screen_power": object_schema(
+            {
+                "action": {
+                    **string,
+                    "enum": ["status", "black", "dim", "wake", "on", "set", "nolock"],
+                    "default": "status",
+                    "description": "Screen power action to perform.",
+                },
+                "brightness": {
+                    **number,
+                    "minimum": 0.0,
+                    "maximum": 1.0,
+                    "description": "Target brightness level between 0.0 (completely dark) and 1.0 (maximum). Required if action is 'set'.",
+                },
+            }
         ),
         "list_files": object_schema(
             {
