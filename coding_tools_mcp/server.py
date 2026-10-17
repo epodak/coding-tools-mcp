@@ -793,6 +793,28 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
         read_only=True,
         idempotent=True,
     ),
+    "list_project_tree": ToolSpec(
+        title="List project tree",
+        description="Recursively list project files, directories, sizes, and modified dates across project folders and Desktop.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "read_project_document": ToolSpec(
+        title="Read project document",
+        description="Read project documents, spreadsheets, text files, and specifications across project folders and Desktop.",
+        read_only=True,
+        idempotent=True,
+    ),
+    "show_desktop_tip": ToolSpec(
+        title="Show desktop tip",
+        description=(
+            "Display an AppKit floating HUD tooltip on the user's desktop with title, message, and an optional "
+            "action button to view details or generated HTML report in browser. "
+            "Can also automatically save html_content to a report file and link to it."
+        ),
+        read_only=True,
+        idempotent=True,
+    ),
     "list_files": ToolSpec(
         title="List files",
         description="List accessible files using glob filters.",
@@ -2758,6 +2780,103 @@ class Runtime:
                 continuation["line_numbers"] = True
             result["next_action"] = {"tool": "read_file", "arguments": continuation}
         return result
+
+    def list_project_tree(self, args: dict[str, Any] | None = None) -> dict[str, Any]:
+        args_copy = dict(args or {})
+        args_copy.setdefault("path", "01_Evenswiss (当前新工作项目)")
+        args_copy.setdefault("recursive", True)
+        args_copy.setdefault("max_depth", 10)
+        return self.list_dir(args_copy)
+
+    def read_project_document(self, args: dict[str, Any]) -> dict[str, Any]:
+        return self.read_file(args or {})
+
+    def show_desktop_tip(self, args: dict[str, Any]) -> dict[str, Any]:
+        title = str(args.get("title") or "MCP 任务完成").strip()
+        message = str(args.get("message") or "").strip()
+        action_url = str(args.get("action_url") or "").strip()
+        action_label = str(args.get("action_label") or "查看网页版详情 ↗").strip()
+        html_content = args.get("html_content")
+        report_name = args.get("report_name")
+        duration = int(args.get("duration_seconds") or 45)
+        style = str(args.get("style") or "teal").strip().lower()
+        sound = bool(args.get("sound", True))
+
+        report_path_str = ""
+        workspace_root = self.workspace.root
+        if html_content:
+            reports_dir = workspace_root / "reports"
+            reports_dir.mkdir(parents=True, exist_ok=True)
+            if not report_name:
+                ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                report_file = reports_dir / f"report_{ts}.html"
+            else:
+                safe_name = re.sub(r"[^\w\-.]", "_", str(report_name))
+                if not safe_name.endswith(".html"):
+                    safe_name += ".html"
+                report_file = reports_dir / safe_name
+            report_file.write_text(str(html_content), encoding="utf-8")
+            action_url = report_file.as_uri()
+            report_path_str = str(report_file)
+        elif action_url:
+            if not (action_url.startswith("http://") or action_url.startswith("https://") or action_url.startswith("file://")):
+                p = Path(action_url)
+                if not p.is_absolute():
+                    p = (workspace_root / p).resolve()
+                if p.exists():
+                    action_url = p.as_uri()
+                    report_path_str = str(p)
+
+        tip_config = {
+            "title": title,
+            "message": message,
+            "action_url": action_url,
+            "action_label": action_label,
+            "duration": float(duration),
+            "style": style,
+            "sound": sound,
+        }
+
+        binary_candidates = [
+            shutil.which("desktop_tip"),
+            "/Users/fenglu/.local/bin/desktop_tip",
+            str(workspace_root / "desktop_tip"),
+        ]
+        binary = next((b for b in binary_candidates if b and os.path.isfile(b) and os.access(b, os.X_OK)), None)
+
+        pid = 0
+        displayed = False
+        status = "unsupported_platform"
+
+        if sys.platform == "darwin" and binary:
+            try:
+                b64_payload = base64.b64encode(json.dumps(tip_config, ensure_ascii=False).encode("utf-8")).decode("ascii")
+                proc = subprocess.Popen(
+                    [binary, "--json-base64", b64_payload],
+                    cwd=str(workspace_root),
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+                pid = proc.pid
+                displayed = True
+                status = "displayed"
+            except Exception as exc:
+                status = f"failed_to_launch: {exc}"
+        elif sys.platform == "darwin":
+            status = "binary_not_found"
+
+        return {
+            "status": status,
+            "title": title,
+            "message": message,
+            "action_url": action_url,
+            "report_path": report_path_str,
+            "displayed": displayed,
+            "pid": pid,
+        }
 
     def list_dir(self, args: dict[str, Any]) -> dict[str, Any]:
         resolved = self.resolve_existing(str(args.get("path", ".")))
@@ -6171,6 +6290,24 @@ def output_schemas() -> dict[str, dict[str, Any]]:
             **truncation,
         },
         "list_dir": {"path": string, "entries": object_array, **truncation},
+        "list_project_tree": {"path": string, "entries": object_array, **truncation},
+        "read_project_document": {
+            "path": string,
+            "content": string,
+            "encoding": string,
+            "total_lines": integer,
+            "total_bytes": integer,
+            **truncation,
+        },
+        "show_desktop_tip": {
+            "status": string,
+            "title": string,
+            "message": string,
+            "action_url": string,
+            "report_path": string,
+            "displayed": boolean,
+            "pid": integer,
+        },
         "list_files": {"path": string, "files": object_array, **truncation},
         "search_text": {
             "query": string,
@@ -6448,6 +6585,38 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                 "include_ignored": {**boolean, "default": False},
                 "sort": {**string, "enum": ["name", "type", "modified"], "default": "name"},
             }
+        ),
+        "list_project_tree": object_schema(
+            {
+                "path": {**string, "default": "01_Evenswiss (当前新工作项目)"},
+                "recursive": {**boolean, "default": True},
+                "max_depth": {**integer, "minimum": 1, "maximum": 20, "default": 10},
+                "max_entries": {**integer, "minimum": 1, "maximum": 10000, "default": 1000},
+                "include_hidden": {**boolean, "default": False},
+            }
+        ),
+        "read_project_document": object_schema(
+            {
+                "path": {**string, "minLength": 1},
+                "start_line": {**integer, "minimum": 1, "default": 1},
+                "end_line": {**integer, "minimum": 1},
+                "max_bytes": {**integer, "minimum": 1, "maximum": 1048576, "default": 131072},
+            },
+            ["path"],
+        ),
+        "show_desktop_tip": object_schema(
+            {
+                "title": {**string, "minLength": 1, "description": "Title of the desktop notification tip."},
+                "message": {**string, "description": "Brief summary message displayed in the notification."},
+                "action_url": {**string, "description": "Optional URL or local file path to open in browser when user clicks the action button."},
+                "action_label": {**string, "default": "查看网页版详情 ↗", "description": "Text label for the action button."},
+                "html_content": {**string, "description": "Optional full HTML report content. When provided, automatically saved to workspace reports/ and linked to the action button."},
+                "report_name": {**string, "description": "Optional filename when saving html_content (e.g. audit_report.html)."},
+                "duration_seconds": {**integer, "minimum": 5, "maximum": 300, "default": 45, "description": "Seconds before the tip automatically fades out."},
+                "style": {**string, "enum": ["teal", "green", "orange", "blue", "purple"], "default": "teal", "description": "Visual theme color accent."},
+                "sound": {**boolean, "default": True, "description": "Whether to play a subtle system alert sound."},
+            },
+            ["title", "message"],
         ),
         "list_files": object_schema(
             {
