@@ -1,0 +1,63 @@
+# ==============================================================================
+# 🧭 Project Metadata & Semantic Identity (project.yaml)
+# 本文件随代码入库，是 Project Catalog / Cloudflare MCP / AI 语义索引的单一真源
+# ==============================================================================
+
+# 1. 核心身份与元数据 (Identity)
+id: "coding-tools-mcp"
+name: "Coding Tools MCP (自主可控定制版)"
+summary: >
+  基于 xyTom/coding-tools-mcp 深度定制的本地与远程代码研发 MCP 服务，支持 --unconfined 全盘穿透与软链接、OAuth 2.1 零摩擦认证及自动化长常驻守护。
+why: >
+  官方版本强制沙箱隔离并硬编码拦截绝对路径与父级目录，导致 ChatGPT/Claude 在远程授权设备中无法自由访问桌面或跨目录文件。Fork 后自主掌握 MCP 源码，支持 --unconfined 灵活开关与私有化扩展。
+
+# 2. 生命周期与项目属性 (Lifecycle & Attributes)
+status: active
+type: tool
+maturity: production
+
+# 3. 关联代码仓库 (Repository Fact)
+repo:
+  provider: github
+  owner: epodak
+  name: "coding-tools-mcp"
+  default_branch: main
+  visibility: public
+  upstream: "https://github.com/xyTom/coding-tools-mcp"
+
+# 4. 工作区布局与本地事实 (Workspace)
+workspace:
+  preferred_name: "2026-10-17_coding-tools-mcp"
+  locations:
+    windows:
+      - "D:/_AI/10_DOING/2026-10-17_coding-tools-mcp"
+
+# 5. 项目关系图谱网络 (Relations & Graph)
+relations:
+  belongs_to:
+    - mcp
+  related:
+    - "https://github.com/xyTom/coding-tools-mcp"
+  replaces: []
+
+# 6. 能力标签与技术栈 (Capabilities & Stack)
+capabilities:
+  stack:
+    - python
+    - mcp
+    - uv
+  tags:
+    - mcp-server
+    - remote-control
+    - unconfined-filesystem
+    - oauth2
+
+# 7. 智能体与控制面接入 (Agent Directives)
+agent:
+  docs_portal: "docs/README.md"
+  sync_to_catalog: true
+
+# 8. Web Presence
+web:
+  enabled: false
+  sites: []

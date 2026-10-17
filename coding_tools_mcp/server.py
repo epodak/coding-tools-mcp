@@ -1342,17 +1342,23 @@ class ResolvedPath:
 
 
 class Workspace:
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, unconfined: bool = False) -> None:
+        self.unconfined = (
+            unconfined
+            or truthy_env(os.environ.get(f"{ENV_PREFIX}_UNCONFINED"))
+            or truthy_env(os.environ.get("CODING_MCP_UNCONFINED"))
+        )
         self.root = root.expanduser().resolve(strict=True)
         if not self.root.is_dir():
             raise ToolFailure("INVALID_ARGUMENT", "Workspace root must be a directory.", category="validation")
-        unsafe_roots = {"/"}
-        try:
-            unsafe_roots.add(str(Path.home().resolve()))
-        except RuntimeError:
-            pass
-        if str(self.root) in unsafe_roots:
-            raise ToolFailure("INVALID_ARGUMENT", "Unsafe workspace root rejected.", category="security")
+        if not self.unconfined:
+            unsafe_roots = {"/"}
+            try:
+                unsafe_roots.add(str(Path.home().resolve()))
+            except RuntimeError:
+                pass
+            if str(self.root) in unsafe_roots:
+                raise ToolFailure("INVALID_ARGUMENT", "Unsafe workspace root rejected.", category="security")
         self.git_path = shutil.which("git")
 
     def _reject_unsafe_text(self, raw_path: str) -> PurePosixPath:
@@ -1360,15 +1366,31 @@ class Workspace:
             raise ToolFailure("INVALID_ARGUMENT", "Path must be a non-empty string.", category="validation")
         if "\x00" in raw_path:
             raise ToolFailure("INVALID_ARGUMENT", "Path contains a NUL byte.", category="validation")
-        if raw_path.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", raw_path):
-            raise ToolFailure("ABSOLUTE_PATH_DENIED", "Absolute paths are denied.", category="security")
-        pure = PurePosixPath(raw_path)
-        if any(part == ".." for part in pure.parts):
-            raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
-        return pure
+        if not self.unconfined:
+            if raw_path.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", raw_path):
+                raise ToolFailure("ABSOLUTE_PATH_DENIED", "Absolute paths are denied.", category="security")
+            pure = PurePosixPath(raw_path)
+            if any(part == ".." for part in pure.parts):
+                raise ToolFailure("PATH_OUTSIDE_WORKSPACE", "Path escapes the configured workspace.", category="security")
+            return pure
+        return PurePosixPath(raw_path)
 
     def resolve_existing(self, raw_path: str = ".") -> ResolvedPath:
         pure = self._reject_unsafe_text(raw_path or ".")
+        if self.unconfined:
+            str_path = str(pure)
+            if str_path.startswith("~"):
+                candidate = Path(str_path).expanduser()
+            elif str_path.startswith("/") or (pure.parts and pure.parts[0] == "/") or re.match(r"^[A-Za-z]:[\\/]", str_path):
+                candidate = Path(str_path)
+            else:
+                candidate = self.root.joinpath(*pure.parts)
+            try:
+                resolved = candidate.resolve(strict=True)
+            except FileNotFoundError as exc:
+                raise ToolFailure("NOT_FOUND", f"Path not found: {raw_path}", category="not_found") from exc
+            return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
+
         candidate = self.root.joinpath(*pure.parts)
         try:
             resolved = candidate.resolve(strict=True)
@@ -1383,6 +1405,32 @@ class Workspace:
         pure = self._reject_unsafe_text(raw_path)
         if pure.name in {"", ".", ".."}:
             raise ToolFailure("INVALID_ARGUMENT", "Invalid write target.", category="validation")
+        if self.unconfined:
+            str_path = str(pure)
+            if str_path.startswith("~"):
+                candidate = Path(str_path).expanduser()
+            elif str_path.startswith("/") or (pure.parts and pure.parts[0] == "/") or re.match(r"^[A-Za-z]:[\\/]", str_path):
+                candidate = Path(str_path)
+            else:
+                candidate = self.root.joinpath(*pure.parts)
+            if candidate.exists() or candidate.is_symlink():
+                resolved = candidate.resolve(strict=True)
+                return ResolvedPath(normalize_rel_display(resolved, self.root), resolved, True)
+
+            parent = candidate.parent
+            missing: list[Path] = []
+            while not parent.exists():
+                missing.append(parent)
+                if parent == self.root or parent.parent == parent:
+                    break
+                parent = parent.parent
+            try:
+                resolved_parent = parent.resolve(strict=True)
+            except FileNotFoundError as exc:
+                raise ToolFailure("NOT_FOUND", f"Parent directory not found: {raw_path}", category="not_found") from exc
+            target = resolved_parent.joinpath(*reversed([p.name for p in missing]), candidate.name)
+            return ResolvedPath(normalize_rel_display(target, self.root), target, False)
+
         candidate = self.root.joinpath(*pure.parts)
         if candidate.exists() or candidate.is_symlink():
             resolved = candidate.resolve(strict=True)
@@ -1407,6 +1455,8 @@ class Workspace:
         return ResolvedPath(normalize_rel_display(target, self.root), target, False)
 
     def reject_write_symlink(self, raw_path: str) -> None:
+        if self.unconfined:
+            return
         pure = self._reject_unsafe_text(raw_path)
         candidate = self.root.joinpath(*pure.parts)
         if candidate.is_symlink():
@@ -1423,7 +1473,10 @@ class Workspace:
         try:
             rel = path.relative_to(self.root)
         except ValueError:
-            return True
+            if self.unconfined:
+                rel = PurePosixPath(path.name)
+            else:
+                return True
         parts = rel.parts
         if not include_hidden and any(part.startswith(".") for part in parts if part not in {".", ""}):
             return True
@@ -1441,6 +1494,8 @@ class Workspace:
             resolved = path.resolve(strict=True)
         except FileNotFoundError:
             return False
+        if self.unconfined:
+            return True
         return is_relative_to(resolved, self.root)
 
     def git_ignored_paths(self, rel_paths: list[str]) -> set[str]:
@@ -1540,8 +1595,9 @@ class Runtime:
         workspace_mutation: WorkspaceMutationPolicy | None = None,
         transport: str = "stdio",
         command_manager: WorkspaceCommandManager | None = None,
+        unconfined: bool = False,
     ) -> None:
-        self.workspace = Workspace(workspace)
+        self.workspace = Workspace(workspace, unconfined=unconfined)
         self.workspace_mutation = workspace_mutation or WorkspaceMutationPolicy()
         if self.workspace_mutation.mode not in WORKSPACE_MUTATION_CHOICES:
             raise ToolFailure(
@@ -3830,6 +3886,8 @@ class Runtime:
 
     def _check_command_path_candidate(self, candidate: str) -> None:
         """Reject command path candidates that escape the workspace or cannot be checked safely."""
+        if getattr(self.workspace, "unconfined", False):
+            return
         candidate = candidate.strip()
         if not candidate or candidate in {"-", "--"}:
             return
@@ -7477,6 +7535,7 @@ def build_runtime(
         workspace_mutation=runtime_policy.workspace_mutation,
         transport=transport,
         command_manager=command_manager,
+        unconfined=getattr(args, "unconfined", False),
     )
     if emit_warning and runtime.capabilities.skip_all_permissions:
         print(
@@ -7758,6 +7817,15 @@ def build_parser() -> argparse.ArgumentParser:
             "annotations; mutation and execution still happen; requires --permission-mode dangerous, and "
             "requires auth over HTTP; server_info and the server card keep reporting the real annotations; "
             f"can also be enabled with {ENV_PREFIX}_DANGEROUSLY_FAKE_READONLY_ANNOTATIONS=1"
+        ),
+    )
+    parser.add_argument(
+        "--unconfined",
+        action="store_true",
+        default=truthy_env(os.environ.get(f"{ENV_PREFIX}_UNCONFINED")) or truthy_env(os.environ.get("CODING_MCP_UNCONFINED")),
+        help=(
+            "disable workspace confinement; allow reading/writing arbitrary paths, symlink traversal, "
+            f"and absolute paths; can also be enabled with {ENV_PREFIX}_UNCONFINED=1 or CODING_MCP_UNCONFINED=1"
         ),
     )
     return parser

@@ -4,6 +4,13 @@
 
 > 让任何 AI 聊天应用或 agent，都能安全地上手你的代码仓库。
 
+> 🌟 **自主定制增强特性 (Unconfined Enhancement)**：
+> 原生版本强制沙箱隔离并拦截绝对路径与上层目录。本项目 Fork 自 [xyTom/coding-tools-mcp](https://github.com/xyTom/coding-tools-mcp)，新增 `--unconfined` 选项与 `CODING_TOOLS_MCP_UNCONFINED=1` 环境变量：
+> - 支持家目录缩写（`~`）、绝对路径（`/Users/...`、`C:\...`）与全盘路径穿透解析；
+> - 允许符号链接（Symlink）跨工作区自由穿透访问；
+> - 解除命令参数中对绝对路径的安全阻断；
+> - 配合 `--oauth-mode` 与远程隧道（如 Cloudflare Tunnel / Ngrok），可直接作为全受控设备的远程 AI 编码伴侣。
+
 [![PyPI](https://img.shields.io/pypi/v/coding-tools-mcp)](https://pypi.org/project/coding-tools-mcp/)
 [![npm](https://img.shields.io/npm/v/coding-tools-mcp)](https://www.npmjs.com/package/coding-tools-mcp)
 [![Python](https://img.shields.io/pypi/pyversions/coding-tools-mcp)](https://pypi.org/project/coding-tools-mcp/)
