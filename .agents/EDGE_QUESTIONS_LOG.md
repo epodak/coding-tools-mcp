@@ -2,6 +2,25 @@
 
 > 记录用户方向性问题、认知变化及实现日志；原始商业文件不复制进代码仓库。
 
+## 2026-10-17 | MacBook 闲置自动黑屏熄灭背光且免锁屏密码，三层架构桥接至 AI 工具栈
+
+- **问题核心**：用户询问 MacBook 能否在长时间无人操作时仅将亮度降至最低或黑屏熄灭背光以节省能耗与防刺眼，但绝对不要锁屏（轻触即回，无需输密码），并询问现有 AI 工具体系如何把该能力嫁接过来。
+- **方向信号**：
+  - **核心现象/痛点**：传统 macOS 锁屏机制与系统休眠强绑定，容易触发密码锁屏打断远程 AI 任务或需要手动频繁解锁；单纯关闭系统休眠又会导致屏幕常亮耗电刺眼。
+  - **机制与原理**：
+    - **系统层免密码锁屏**：关闭 `com.apple.screensaver askForPassword`，并将延迟拉满至 `2147483647`，使屏幕休眠唤醒时 100% 免密直达；
+    - **物理空闲无感探针**：利用 macOS `CoreGraphics` 的 `CGEventSourceSecondsSinceLastEventType` 精确检测物理输入闲置时间；
+    - **原生底层无 root 背光调控**：通过 `DisplayServicesSetBrightness` 配合 `caffeinate`，无需 sudo 即可将亮度平滑淡出至 0.0（完全断电熄灭背光），触控瞬间无延迟恢复原亮度；
+    - **三层工具化桥接**：常驻守护进程（`com.user.macscreen`）负责硬件级自动降光、原生 CLI（`mac-screen`）负责命令行直达、MCP 服务（`manage_screen_power`）负责供 ChatGPT/Claude 在长时间批处理前后调度屏幕电源。
+  - **认知转变**：AI 宿主硬件不仅是“被操控”的无意识服务器，其物理状态（屏幕背光、功耗、人机现场感知）也应成为可编程的系统能力；把自动闲置调度与 AI 工具调用解耦并有机分层，既保障物理省电，又确保计算任务长青存活。
+- **决策与影响**：
+  - 交付原生 `mac-screen` Swift 工具至 `/Users/fenglu/.local/bin/`；
+  - 部署 `com.user.macscreen` LaunchAgent（5 分钟闲置自黑屏，动键即醒）；
+  - 在 `coding_tools_mcp` 注册并部署 `manage_screen_power` 工具（支持 `status`/`black`/`wake`/`dim`/`set`/`nolock`）；
+  - Windows 端注册 `mac-screen` CLI 短命令至 `D:\Tool\DIY`，闭环跨端调度。 → [实现日志](../_dev_log/2026-10-17_macbook-screen-power-nolock.md)
+
+---
+
 ## 2026-10-17 | 完整重装消除 Mac 混版，扩范围授权与服务更新分开验收
 
 - **问题核心**：
