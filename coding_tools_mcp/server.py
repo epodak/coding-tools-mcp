@@ -763,7 +763,10 @@ def _image_content(payload: dict[str, Any]) -> list[dict[str, Any]]:
 TOOL_REGISTRY: dict[str, ToolSpec] = {
     "server_info": ToolSpec(
         title="Server info",
-        description="Return server, workspace, project-context, auth, policy, and fixed-tool metadata.",
+        description=(
+            "Return server, workspace, project-context, auth, policy, and fixed-tool metadata, "
+            "including the effective filesystem path scope; the workspace is not necessarily an access boundary."
+        ),
         read_only=True,
         idempotent=True,
     ),
@@ -776,7 +779,7 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     "read_file": ToolSpec(
         title="Read file",
         description=(
-            "Read a UTF-8 text file slice inside the configured workspace. The result text opens with a "
+            "Read a UTF-8 text file slice accessible to this server. The result text opens with a "
             "banner carrying the file's revision (the token apply_changes needs). Pass "
             "line_numbers=true to prefix each line with its number and a tab in the text, which is the "
             "numbering apply_changes edits use."
@@ -786,19 +789,19 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "list_dir": ToolSpec(
         title="List directory",
-        description="List directory entries inside the configured workspace.",
+        description="List directory entries accessible to this server.",
         read_only=True,
         idempotent=True,
     ),
     "list_files": ToolSpec(
         title="List files",
-        description="List workspace files using glob filters.",
+        description="List accessible files using glob filters.",
         read_only=True,
         idempotent=True,
     ),
     "search_text": ToolSpec(
         title="Search text",
-        description="Search UTF-8 workspace files for text or regex matches.",
+        description="Search accessible UTF-8 files for text or regex matches.",
         read_only=True,
         idempotent=True,
     ),
@@ -944,13 +947,18 @@ TOOL_REGISTRY: dict[str, ToolSpec] = {
     ),
     "view_image": ToolSpec(
         title="View image",
-        description="Return a workspace image as MCP image content.",
+        description="Return an accessible image as MCP image content.",
         read_only=True,
         idempotent=True,
         content_builder=_image_content,
         gated_by="enable_view_image",
     ),
 }
+
+# 仅给真正使用 Workspace 路径解析器的文件工具追加范围，不能把它冒充为 exec 或 Git 的权限边界。
+FILESYSTEM_POLICY_TOOLS = frozenset({
+    "read_file", "list_dir", "list_files", "search_text", "view_image", "apply_patch", "apply_changes",
+})
 
 LANDLOCK_CREATE_RULESET_VERSION = 1
 LANDLOCK_RULE_PATH_BENEATH = 1
@@ -1953,7 +1961,8 @@ class Runtime:
             "protocolVersion": protocol_version,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": self.server_identity(),
-            "instructions": self.project_context.server_instructions(),
+            "instructions": self.filesystem_policy_payload()["description"] + "\n\n"
+            + self.project_context.server_instructions(),
         }
 
     def discover_payload(self) -> dict[str, Any]:
@@ -1970,7 +1979,8 @@ class Runtime:
         return {
             "supportedVersions": list(MODERN_PROTOCOL_VERSIONS),
             "capabilities": {"tools": {"listChanged": False}},
-            "instructions": self.project_context.server_instructions(),
+            "instructions": self.filesystem_policy_payload()["description"] + "\n\n"
+            + self.project_context.server_instructions(),
         }
 
     def server_identity(self) -> dict[str, Any]:
@@ -1987,9 +1997,12 @@ class Runtime:
         }
 
     def list_tools(self) -> dict[str, Any]:
+        filesystem_policy = self.filesystem_policy_payload()
         return {
             "tools": [
-                tool_definition(name, fake_readonly=self.fake_readonly_annotations)
+                tool_definition(
+                    name, fake_readonly=self.fake_readonly_annotations, filesystem_policy=filesystem_policy,
+                )
                 for name in self.exposed_tool_names()
             ]
         }
@@ -2028,6 +2041,33 @@ class Runtime:
     def _landlock_enforced(self, landlock: dict[str, Any]) -> bool:
         return bool(landlock.get("available")) and self.landlock_enabled()
 
+    def filesystem_policy_payload(self) -> dict[str, Any]:
+        # 读取已生效的解析器状态，覆盖环境变量启用的情况；不根据 trusted/dangerous 猜测路径授权。
+        unconfined = self.workspace.unconfined
+        if unconfined:
+            description = (
+                "Relative paths use the workspace as their base, not as an access boundary. "
+                "Absolute paths, ~ home paths and symlink targets outside the workspace are allowed "
+                "by this server's path policy. OS permissions and configured write restrictions still apply."
+            )
+        else:
+            description = (
+                "Structured file paths are confined to the workspace; use workspace-relative paths. "
+                "Absolute paths, ~ home paths and symlink targets outside the workspace are denied "
+                "by this server's path policy. OS permissions and configured write restrictions still apply."
+            )
+        return {
+            "scope": "structured_file_tools",
+            "confinement": "unconfined" if unconfined else "workspace",
+            "relative_path_base": str(self.workspace.root),
+            "workspace_is_access_boundary": not unconfined,
+            "absolute_paths_allowed": unconfined,
+            "home_paths_allowed": unconfined,
+            "symlinks_outside_workspace_allowed": unconfined,
+            "os_permissions_apply": True,
+            "description": description,
+        }
+
     def server_info_payload(self) -> dict[str, Any]:
         tools = self.exposed_tool_names()
         landlock = landlock_status_payload()
@@ -2049,6 +2089,7 @@ class Runtime:
                 "secret_env_filter": self.secret_env_filter_policy(),
             },
             "workspace_mutation_policy": self.workspace_mutation_payload(),
+            "filesystem_policy": self.filesystem_policy_payload(),
             "shell_env_inherit": self.shell_env_policy.inherit,
             "shell_env_include_only": list(self.shell_env_policy.include_only),
             "shell_env_exclude": list(self.shell_env_policy.exclude),
@@ -6088,6 +6129,21 @@ def output_schemas() -> dict[str, dict[str, Any]]:
             "workspace": string,
             "permission_mode": string,
             "workspace_mutation_policy": {"type": "object", "additionalProperties": True},
+            "filesystem_policy": {
+                "type": "object",
+                "properties": {
+                    "scope": {**string, "enum": ["structured_file_tools"]},
+                    "confinement": {**string, "enum": ["workspace", "unconfined"]},
+                    "relative_path_base": string,
+                    "workspace_is_access_boundary": boolean,
+                    "absolute_paths_allowed": boolean,
+                    "home_paths_allowed": boolean,
+                    "symlinks_outside_workspace_allowed": boolean,
+                    "os_permissions_apply": boolean,
+                    "description": string,
+                },
+                "additionalProperties": True,
+            },
             "tools": string_array,
             "tool_count": integer,
         },
@@ -6297,13 +6353,26 @@ def schema_type_name(expected_type: str | list[str]) -> str:
     return expected_type
 
 
-def tool_definition(name: str, *, fake_readonly: bool = False) -> dict[str, Any]:
+def tool_definition(
+    name: str,
+    *,
+    fake_readonly: bool = False,
+    filesystem_policy: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     schemas = input_schemas()
     annotations = tool_annotations(name, fake_readonly=fake_readonly)
+    description = TOOL_REGISTRY[name].description
+    if name in FILESYSTEM_POLICY_TOOLS:
+        # 不改共享注册表或缓存 schema，避免两个不同范围的 Runtime 相互污染描述。
+        scope_description = (
+            filesystem_policy["description"] if filesystem_policy is not None
+            else "Path scope follows the effective filesystem policy reported by server_info."
+        )
+        description = f"{description} {scope_description}"
     return {
         "name": name,
         "title": annotations["title"],
-        "description": TOOL_REGISTRY[name].description,
+        "description": description,
         "inputSchema": schemas[name],
         "outputSchema": tool_output_schema(name),
         "annotations": annotations,
@@ -6448,7 +6517,7 @@ def input_schemas() -> dict[str, dict[str, Any]]:
                             "path": {
                                 **string,
                                 "minLength": 1,
-                                "description": "Workspace-relative file path; used by every action.",
+                                "description": "File path resolved by server_info.filesystem_policy; used by every action.",
                             },
                             "revision": {
                                 **string,

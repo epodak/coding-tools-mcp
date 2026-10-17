@@ -53,6 +53,9 @@ returns — `command_id`, `exit_code`, `output_ref`, `revision`,
 only `ok` and `error`. `additionalProperties` stays open: payloads carry
 advisory fields (`warnings`, `next_action`) that are not part of the contract.
 
+文件工具的描述会随实例实际路径范围生成；`workspace` 不一定是访问边界。
+完整字段定义见 [server_info 的 filesystem_policy](runtime-contract-v0.3.md#server_info)。
+
 ## Result envelope
 
 Every successful tool call has:

@@ -85,10 +85,15 @@ def _render_error(payload: dict[str, Any]) -> str:
 
 
 def _render_server_info(payload: dict[str, Any]) -> str:
-    return (
+    text = (
         f"{payload.get('server', 'coding-tools-mcp')} {payload.get('version', 'unknown')}\n"
         f"Workspace: {payload.get('workspace', '.')}"
     )
+    # 有些客户端只转发 content 文本，不能让真实路径范围仅藏在 structuredContent 中。
+    policy = payload.get("filesystem_policy")
+    if isinstance(policy, dict) and isinstance(policy.get("description"), str):
+        text += f"\nFilesystem: {policy['description']}"
+    return text
 
 
 def _render_exec_environment(payload: dict[str, Any]) -> str:

@@ -439,6 +439,22 @@ per-session value and no runtime counter: there is no session, and how often a
 budget was hit is a property of the process rather than an answer to whichever
 client asked. Those counters travel with telemetry.
 
+`filesystem_policy` 自报结构化文件工具当前生效的路径范围，不代表
+`exec_command` 的沙盒能力，也不代替系统文件权限：
+
+- `scope` 为 `structured_file_tools`；`relative_path_base` 为相对路径的起点。
+- `confinement` 为 `workspace` 时，`workspace_is_access_boundary` 为 `true`，
+  绝对路径、`~` 主目录路径、指向工作区外的软链接目标均不允许。
+- `confinement` 为 `unconfined` 时，工作区只是相对路径起点，而非访问边界；
+  `absolute_paths_allowed`、`home_paths_allowed`、
+  `symlinks_outside_workspace_allowed` 均为 `true`。
+- `os_permissions_apply` 为 `true`；开放路径仍受操作系统权限及已有写入策略约束。
+  此对象来自实际路径解析器状态，而不是根据 `permission_mode` 推测。
+- `description` 同时出现在 `server_info` 的模型可读文本和文件工具的
+  `tools/list` 描述、旧版 `initialize.instructions` 与新版 `discovery.instructions`
+  中，避免只收到文本的客户端误解。不同配置的实例使用各自描述，
+  不改变工具名、输入参数、注解或路径校验行为。
+
 `workspace_mutation_policy` reports who may write to the workspace: `mode` is
 `unrestricted` or `structured-only`, `write_paths` lists the directories that
 stay writable for commands under `structured-only`, `structured_write_tools`

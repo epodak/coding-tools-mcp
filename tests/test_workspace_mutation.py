@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
@@ -18,6 +19,7 @@ from coding_tools_mcp.server import (
     runtime_policy_from_args,
     workspace_mutation_policy_from_args,
 )
+from tests.compliance.mcp_client import StdioMCPClient
 
 
 def parse(argv: list[str]) -> argparse.Namespace:
@@ -227,6 +229,150 @@ class WorkspaceMutationRuntimeTests(unittest.TestCase):
                 self.assertIs(ruleset.call_args.kwargs["workspace_writable"], True)
             finally:
                 runtime.close()
+
+
+class FilesystemCapabilityMetadataTests(unittest.TestCase):
+    PATH_TOOLS = (
+        "read_file", "list_dir", "list_files", "search_text", "view_image",
+        "apply_patch", "apply_changes",
+    )
+
+    def test_effective_path_scope_is_independent_of_permission_mode(self) -> None:
+        # trusted/dangerous 不等于开放路径；自报必须取实际 Workspace 配置。
+        for mode in ("safe", "trusted", "dangerous"):
+            for unconfined in (False, True):
+                with self.subTest(mode=mode, unconfined=unconfined), TemporaryDirectory() as tmp:
+                    runtime = Runtime(Path(tmp), permission_mode=mode, unconfined=unconfined)
+                    try:
+                        policy = runtime.server_info_payload()["filesystem_policy"]
+                        self.assertEqual(policy["confinement"], "unconfined" if unconfined else "workspace")
+                        self.assertEqual(policy["relative_path_base"], str(Path(tmp).resolve()))
+                        self.assertIs(policy["workspace_is_access_boundary"], not unconfined)
+                        for key in ("absolute_paths_allowed", "home_paths_allowed", "symlinks_outside_workspace_allowed"):
+                            self.assertIs(policy[key], unconfined)
+                        self.assertIs(policy["os_permissions_apply"], True)
+                        self.assertEqual(runtime.permission_mode, mode)
+                    finally:
+                        runtime.close()
+
+    def test_environment_enabled_scope_is_reported_from_the_effective_workspace(self) -> None:
+        with TemporaryDirectory() as tmp, patch.dict(os.environ, {"CODING_TOOLS_MCP_UNCONFINED": "1"}):
+            runtime = Runtime(Path(tmp), unconfined=False)
+            try:
+                self.assertEqual(runtime.server_info_payload()["filesystem_policy"]["confinement"], "unconfined")
+            finally:
+                runtime.close()
+
+    def test_tool_catalog_matches_scope_and_does_not_leak_between_runtimes(self) -> None:
+        with TemporaryDirectory() as tmp:
+            confined = Runtime(Path(tmp), permission_mode="trusted", enable_view_image=True)
+            opened = Runtime(Path(tmp), permission_mode="safe", unconfined=True, enable_view_image=True)
+            try:
+                first = confined.list_tools()
+                for runtime, phrase in ((confined, "confined to the workspace"), (opened, "outside the workspace are allowed")):
+                    catalog = {tool["name"]: tool for tool in runtime.list_tools()["tools"]}
+                    policy = runtime.server_info_payload()["filesystem_policy"]
+                    for name in self.PATH_TOOLS:
+                        with self.subTest(name=name, scope=policy["confinement"]):
+                            self.assertIn(phrase, catalog[name]["description"])
+                            self.assertIn(policy["description"], catalog[name]["description"])
+                            self.assertEqual(catalog[name]["inputSchema"], server_module.input_schemas()[name])
+                            self.assertEqual(catalog[name]["annotations"], server_module.tool_annotations(name))
+                self.assertEqual(confined.list_tools(), first)
+                self.assertNotIn("outside the workspace are allowed", server_module.tool_definition("read_file")["description"])
+            finally:
+                confined.close()
+                opened.close()
+
+    def test_confined_metadata_does_not_weaken_real_absolute_or_parent_path_denial(self) -> None:
+        with TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            workspace = parent / "workspace"
+            workspace.mkdir()
+            (parent / "outside.txt").write_text("outside", encoding="utf-8")
+            runtime = Runtime(workspace, permission_mode="dangerous")
+            try:
+                self.assertFalse(runtime.server_info_payload()["filesystem_policy"]["absolute_paths_allowed"])
+                for path, code in ((str(parent / "outside.txt"), "ABSOLUTE_PATH_DENIED"), ("../outside.txt", "PATH_OUTSIDE_WORKSPACE")):
+                    result = runtime.call_tool("read_file", {"path": path})
+                    self.assertTrue(result["isError"])
+                    self.assertEqual(result["structuredContent"]["error"]["code"], code)
+            finally:
+                runtime.close()
+
+    def test_open_scope_reads_real_absolute_and_home_paths_without_changing_mode(self) -> None:
+        with TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            workspace = parent / "workspace"
+            workspace.mkdir()
+            (parent / "outside.txt").write_text("真实文件", encoding="utf-8")
+            with patch.dict(os.environ, {"HOME": str(parent), "USERPROFILE": str(parent)}):
+                runtime = Runtime(workspace, permission_mode="safe", unconfined=True)
+                try:
+                    self.assertTrue(runtime.server_info_payload()["filesystem_policy"]["home_paths_allowed"])
+                    for path in (str(parent / "outside.txt"), "~/outside.txt"):
+                        result = runtime.call_tool("read_file", {"path": path})
+                        self.assertFalse(result["isError"], result)
+                        self.assertEqual(result["structuredContent"]["content"], "真实文件")
+                    self.assertEqual(runtime.permission_mode, "safe")
+                finally:
+                    runtime.close()
+
+    def test_model_facing_server_info_includes_the_same_policy_as_structured_content(self) -> None:
+        for unconfined in (False, True):
+            with self.subTest(unconfined=unconfined), TemporaryDirectory() as tmp:
+                runtime = Runtime(Path(tmp), unconfined=unconfined)
+                try:
+                    result = runtime.call_tool("server_info", {})
+                    self.assertFalse(result["isError"])
+                    description = result["structuredContent"]["filesystem_policy"]["description"]
+                    text = "\n".join(item.get("text", "") for item in result["content"])
+                    self.assertIn(description, text)
+                    schema = server_module.tool_output_schema("server_info")["properties"]
+                    self.assertIn("filesystem_policy", schema)
+                finally:
+                    runtime.close()
+
+
+    def test_handshake_and_discovery_do_not_contradict_the_effective_scope(self) -> None:
+        for unconfined in (False, True):
+            with self.subTest(unconfined=unconfined), TemporaryDirectory() as tmp:
+                workspace = Path(tmp)
+                (workspace / "AGENTS.md").write_text("保留项目指令", encoding="utf-8")
+                runtime = Runtime(workspace, unconfined=unconfined)
+                try:
+                    description = runtime.server_info_payload()["filesystem_policy"]["description"]
+                    for payload in (runtime.initialize_result(), runtime.discover_payload()):
+                        self.assertIn(description, payload["instructions"])
+                        self.assertIn("保留项目指令", payload["instructions"])
+                        self.assertNotIn("Use these tools only for coding operations inside", payload["instructions"])
+                finally:
+                    runtime.close()
+
+    def test_fresh_stdio_clients_observe_the_actual_path_boundary(self) -> None:
+        # 启动真实 CLI 进程并通过 MCP 协议读文件，防止只有内部元数据单测通过。
+        with TemporaryDirectory() as tmp:
+            parent = Path(tmp)
+            workspace = parent / "workspace"
+            workspace.mkdir()
+            outside = parent / "outside.txt"
+            outside.write_text("protocol evidence", encoding="utf-8")
+            for unconfined in (False, True):
+                args = ["--permission-mode", "trusted"] + (["--unconfined"] if unconfined else [])
+                with self.subTest(unconfined=unconfined), StdioMCPClient(workspace, extra_args=args) as client:
+                    result = client.call_tool("server_info", {})
+                    self.assertFalse(result["isError"])
+                    policy = result["structuredContent"]["filesystem_policy"]
+                    self.assertIs(policy["absolute_paths_allowed"], unconfined)
+                    catalog = {t["name"]: t for t in client.rpc("tools/list")["tools"]}
+                    self.assertIn(policy["description"], catalog["read_file"]["description"])
+                    read = client.call_tool("read_file", {"path": str(outside)})
+                    if unconfined:
+                        self.assertFalse(read["isError"], read)
+                        self.assertEqual(read["structuredContent"]["content"], "protocol evidence")
+                    else:
+                        self.assertTrue(read["isError"])
+                        self.assertEqual(read["structuredContent"]["error"]["code"], "ABSOLUTE_PATH_DENIED")
 
 
 if __name__ == "__main__":

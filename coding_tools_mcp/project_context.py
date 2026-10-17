@@ -48,7 +48,7 @@ class ProjectContext:
 
     def server_instructions(self) -> str:
         sections = [
-            "Use these tools only for coding operations inside the configured workspace.",
+            "Use these tools for user-authorized operations, following the server's effective filesystem policy.",
             "Prefer apply_changes for edits you can express as line ranges and apply_patch for "
             "context-anchored edits; they are the only direct file-modification tools. Do not "
             "modify files through exec_command.",
