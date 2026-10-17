@@ -13,7 +13,6 @@ import plistlib
 import shutil
 import subprocess
 import sys
-import time
 from datetime import datetime, timezone
 
 HOME = pathlib.Path.home()
